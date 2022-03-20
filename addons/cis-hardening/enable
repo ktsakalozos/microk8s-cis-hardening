@@ -1,0 +1,99 @@
+#!/bin/bash
+
+set -ux
+
+source "$SNAP/actions/common/utils.sh"
+
+SCRIPT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)
+
+
+function require_root() {
+  if [ "$EUID" -ne 0 ]
+  then
+    echo "This addon needs to be run as root. Please use sudo."
+    exit 1
+  fi
+}
+
+function require_root() {
+  "$SNAP/microk8s-enable.wrapper" rbac
+}
+
+function fix_auth_kubelet() {
+  refresh_opt_in_local_config  anonymous-auth false kubelet
+  refresh_opt_in_local_config  authorization-mode Webhook kubelet
+}
+
+function fix_kernel_params() {
+  refresh_opt_in_local_config protect-kernel-defaults true kubelet
+}
+
+function fix_arg_permissions() {
+  chmod 644 -R $SNAP_DATA/args/* 
+  chown root:root -R $SNAP_DATA/args/* 
+}
+
+function fix_certs_permissions() {
+  chmod 644 -R $SNAP_DATA/certs/
+  chown root:root -R $SNAP_DATA/certs/
+}
+
+function fix_credentials_permissions() {
+  for f in kubelet.config scheduler.config controller.config
+  do
+    chmod 644 $SNAP_DATA/credentials/$f
+    chown root:root $SNAP_DATA/credentials/$f
+  done
+}
+
+function download_kube_bench() {
+  if ! [ -e $SCRIPT_DIR/kube-bench ]
+  then
+    mkdir -p $SCRIPT_DIR/tmp/
+    (cd $SCRIPT_DIR/tmp
+      wget https://github.com/aquasecurity/kube-bench/releases/download/v0.6.6/kube-bench_0.6.6_linux_amd64.tar.gz
+      tar -zxvf kube-bench_0.6.6_linux_amd64.tar.gz
+      cp ./kube-bench ../
+    )
+    rm -rf $SCRIPT_DIR/tmp
+  fi
+}
+
+function fix_admission_plugins() {
+  refresh_opt_in_local_config enable-admission-plugins PodSecurityPolicy,NodeRestriction,SecurityContextDeny,AlwaysPullImages kube-apiserver
+}
+
+function run_kube_bench() {
+  (cd $SCRIPT_DIR
+    ./kube-bench  --version 1.20 --config ./cfg/config.yaml --config-dir ./cfg/ -v=5 # --check=1.1.13
+  )
+}
+
+function fix_profiling() {
+  refresh_opt_in_local_config profiling false kube-apiserver
+  refresh_opt_in_local_config profiling false kube-scheduler
+  refresh_opt_in_local_config profiling false kube-controller-manager 
+}
+
+function fix_auditing() {
+  mkdir -p $SNAP_COMMON/var/log/
+  refresh_opt_in_local_config audit-log-path $SNAP_COMMON/var/log/audit.log kube-apiserver
+  refresh_opt_in_local_config audit-log-maxage 30 kube-apiserver
+  refresh_opt_in_local_config audit-log-maxbackup 10 kube-apiserver
+  refresh_opt_in_local_config audit-log-maxsize 100 kube-apiserver
+}
+
+require_root
+require_dns
+
+fix_kernel_params
+fix_admission_plugins
+fix_arg_permissions
+fix_auth_kubelet
+fix_profiling
+fix_auditing
+fix_certs_permissions
+fix_credentials_permissions
+restart_service kubelite
+download_kube_bench
+run_kube_bench
